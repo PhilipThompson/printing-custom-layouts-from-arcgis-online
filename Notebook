@@ -1,0 +1,116 @@
+from arcgis.gis import GIS
+import arcpy
+import send2trash
+import yaml
+import time 
+
+with open('/arcgis/home/credentials.yaml') as file:
+    credentials = yaml.load(file, Loader=yaml.FullLoader)
+    
+with open('/arcgis/home/layouts.yaml') as file2:
+    layouts = yaml.load(file2, Loader=yaml.FullLoader)
+
+#Sign in both APIs to ArcGIS Online
+gis = GIS("home")
+arcpy.SignInToPortal("https://www.arcgis.com", credentials['username'], credentials['password'])
+
+# Title: Reports | Type: Feature Service | Owner: PhilipThompson
+item = gis.content.get("e13a0c6b1d6f486da27aafc34cc28219")
+
+# Title: Generated Report Extents | Type: Feature Service | Owner: PhilipThompson
+item2 = gis.content.get("aabd0b3274374f03a0f12bbfbfd99e36")
+
+# Add project to notebook workspace and define below
+dataset = '/arcgis/home/POC_PrintProject.aprx'
+
+#Define file above as a project
+aprx = arcpy.mp.ArcGISProject(dataset)
+
+#run for 12.5 mins - 750 seconds
+end = time.time() + 750
+while time.time() < end:
+
+    #find extents added since last Print job
+    query_result = item.layers[0].query(where='IsGenerated<>1', out_fields='*')
+
+    if len(query_result.features) > 0:
+    
+        for feature in query_result.features:
+            #get appropriate layout, height, width and map
+            layout = feature.attributes['Layout']
+            printLayout = 'A3_Landscape*'
+            height = 0
+            width = 0
+        
+            if layout == 'A3Landscape':
+                printLayout = 'A3_Landscape*'
+                height = layouts['A3LandscapeHeight']
+                width = layouts['A3LandscapeWidth']
+            elif layout == 'A3Portrait':
+                printLayout = 'A3_Portrait*'
+                height = layouts['A3PortraitHeight']
+                width = layouts['A3PortraitWidth']
+            elif layout == 'A4Landscape':
+                printLayout = 'A4_Landscape*'
+                height = layouts['A4LandscapeHeight']
+                width = layouts['A4LandscapeWidth']
+            elif layout == 'A4Portrait':
+                printLayout = 'A4_Portrait*'
+                height = layouts['A4PortraitHeight']
+                width = layouts['A4PortraitWidth']
+
+            layout = aprx.listLayouts(printLayout)[0]
+
+            # Set title
+            title = layout.listElements("text_element", "Text 1")[0]
+            title.text = feature.attributes['Title']
+
+            # Get Map Frame
+            mf = layout.listElements("mapframe_element", "*")[0]
+
+            # Captured from UI
+            chosenScale = feature.attributes['Scale']
+
+            #convert width to meters
+            widthInMapUnit = width * 0.01;
+            #convert height to meters
+            heightInMapUnit = height * 0.01;
+
+            #adjustment from center point
+            heightAdj = (heightInMapUnit * chosenScale) / 2
+            widthAdj = (widthInMapUnit * chosenScale) / 2
+
+            #calculate new extent
+            x1 = feature.geometry['x'] - widthAdj;
+            x2 = feature.geometry['x'] + widthAdj;
+            y1 = feature.geometry['y'] - heightAdj;
+            y2 = feature.geometry['y'] + heightAdj;
+
+            newExtent = mf.camera.getExtent() 
+            newExtent.XMin = x1
+            newExtent.YMin = y1
+            newExtent.XMax = x2
+            newExtent.YMax = y2
+            mf.camera.setExtent(newExtent)
+
+            #generate pdf
+            pdfName = '/arcgis/home/printlayout' + feature.attributes['GlobalID'] + '.pdf'
+            layout.exportToPDF(pdfName)
+
+            #save pdf to feature attachments
+            item.layers[0].attachments.add(feature.attributes['OBJECTID'], pdfName)
+
+            #could do these at the end in one update operation        
+            newFeature = {"attributes": {}, "geometry": {"rings": [[[x1, y1], [x1, y2], [x2, y2], [x2, y1], [x1, y1]]]}}
+            item2.layers[0].edit_features(adds=[newFeature])
+
+            #update print extent feature 
+            feature.attributes['IsGenerated'] = 1
+            item.layers[0].edit_features(updates=[feature])
+
+            #clean up
+            send2trash.send2trash(pdfName)
+            
+    else :
+        #wait 2 seconds before querying again
+        time.sleep(2)
